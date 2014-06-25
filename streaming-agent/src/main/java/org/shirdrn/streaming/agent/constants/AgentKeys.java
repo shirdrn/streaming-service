@@ -4,6 +4,7 @@ public interface AgentKeys {
 
 	// Used for Agent Side
 	
+	String  AGENT_CLIENT_PUSH_CLIENT_CLASS= "agent.client.push.client.class";
 	String AGENT_CLIENT_CONNECT_RETRY_TIMES = "agent.client.connect.retry.times";
 	String AGENT_CLIENT_CONNECT_RETRY_SLEEP = "agent.client.connect.retry.sleep";
 	String AGENT_CLIENT_QUEUE_TAKE_INTERVAL = "agent.client.queue.take.interval";

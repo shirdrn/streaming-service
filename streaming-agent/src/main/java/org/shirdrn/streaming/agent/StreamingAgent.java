@@ -12,46 +12,54 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.shirdrn.streaming.agent.common.PushClient;
 import org.shirdrn.streaming.agent.constants.AgentConstants;
+import org.shirdrn.streaming.agent.constants.AgentKeys;
 import org.shirdrn.streaming.common.StreamingEndpoint;
+import org.shirdrn.streaming.utils.ReflectionUtils;
 import org.shirdrn.streaming.utils.ThreadPoolUtils;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Maps;
 
 public class StreamingAgent extends StreamingEndpoint {
 
 	private static final Log LOG = LogFactory.getLog(StreamingAgent.class);
 	private final Configuration agentConfig;
-	private Configuration logConfig;
-	private DirectoriesManager logDirsManager;
-	private FileMetadataManager logFileMetaManager;
-	private FileReaderManager logFileReaderManager;
+	private Configuration fileConfig;
+	private DirectoriesManager directoriesManager;
+	private FileMetadataManager fileMetadataManager;
+	private FileReaderManager fileReaderManager;
 	private ExecutorService clientExecutorService;
-	private final String clientPoolName = "CLIENT";
+	private final String clientPoolName = "CLI";
 	private final Map<PushClient, Boolean> clients = Maps.newHashMap();
+	private final String pushClientClazz;
 	
 	public StreamingAgent() throws Exception {
 		super();
 		agentConfig = new PropertiesConfiguration(AgentConstants.AGENT_CONFIG);
-		logConfig = new PropertiesConfiguration(AgentConstants.AGENT_FILE_CONFIG);
+		fileConfig = new PropertiesConfiguration(AgentConstants.AGENT_FILE_CONFIG);
+		pushClientClazz = agentConfig.getString(AgentKeys.AGENT_CLIENT_PUSH_CLIENT_CLASS);
+		Preconditions.checkArgument(pushClientClazz != null ,
+				"Push client implementation class MUST not be null!");
+		LOG.info("Push client implementation class: " + pushClientClazz);
 	}
 
 	@Override
 	public void start() throws Exception {
-		// create & configure log dirs manager
-		logDirsManager = new DirectoriesManager(logConfig);
-		logDirsManager.setConfig(agentConfig);
-		logDirsManager.start();
+		// create & configure directories manager
+		directoriesManager = new DirectoriesManager(fileConfig);
+		directoriesManager.setConfig(agentConfig);
+		directoriesManager.start();
 		LOG.info("Log dirs manager started!");
 		
-		// create & configure log file meta manager
-		logFileMetaManager = new FileMetadataManager(logDirsManager);
-		logFileMetaManager.start();
+		// create & configure file metadata manager
+		fileMetadataManager = new FileMetadataManager(directoriesManager);
+		fileMetadataManager.start();
 		LOG.info("Log file meta manager started!");
 		
-		// create & configure reader manager
-		logFileReaderManager = new FileReaderManager(logFileMetaManager);
-		logFileReaderManager.setConfig(agentConfig);
-		logFileReaderManager.start();
+		// create & configure file reader manager
+		fileReaderManager = new FileReaderManager(fileMetadataManager);
+		fileReaderManager.setConfig(agentConfig);
+		fileReaderManager.start();
 		LOG.info("Reader manager started!");
 		
 		// create & configure streaming clients
@@ -61,19 +69,21 @@ public class StreamingAgent extends StreamingEndpoint {
 	}
 
 	private int computeClients() {
-		return logDirsManager.getTypes().size();
+		return directoriesManager.getTypes().size();
 	}
 
 	private void configureClient() {
 		int clientCount = computeClients();
 		LOG.info("Prepare to create " + clientCount + " push clients.");
 		final StreamingEndpoint endpoint = this;
-		List<Integer> logTypes = new ArrayList<Integer>(logDirsManager.getTypes());
+		List<Integer> types = new ArrayList<Integer>(directoriesManager.getTypes());
 		for(int i=0; i<clientCount; i++) {
 			try {
 				final int id = i;
-				final int logType = logTypes.get(id);
-				final MinaPushClient c = new MinaPushClient(endpoint, id, logType, logFileReaderManager);
+				final int type = types.get(id);
+				final PushClient c = ReflectionUtils.newInstance(pushClientClazz, 
+						PushClient.class, this.getClass().getClassLoader(),
+						new Object[] {endpoint, id, type, fileReaderManager});
 				clients.put(c, true);
 				LOG.debug("Push client created: " + c);
 				clientExecutorService.execute(new Runnable() {
@@ -99,13 +109,13 @@ public class StreamingAgent extends StreamingEndpoint {
 			LOG.info("Client stopped: client=" + client.getKey());
 		}
 		
-		logDirsManager.stop();
+		directoriesManager.stop();
 		LOG.info("Log dirs manager stopped!");
 		
-		logFileMetaManager.stop();
+		fileMetadataManager.stop();
 		LOG.info("Log file meta manager stopped!");
 		
-		logFileReaderManager.stop();
+		fileReaderManager.stop();
 		LOG.info("Reader manager stopped!");
 	}
 	

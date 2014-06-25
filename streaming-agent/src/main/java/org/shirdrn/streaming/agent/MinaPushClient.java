@@ -21,7 +21,7 @@ import org.shirdrn.streaming.common.constants.StreamingKeys;
 import com.google.common.base.Preconditions;
 
 /**
- * Log push client, process actual network communications.
+ * MINA push client, process actual network communications.
  * Currently we use MINA framework as the network layer of architecture.
  * 
  * @author yanjun
@@ -29,7 +29,7 @@ import com.google.common.base.Preconditions;
 public class MinaPushClient  extends AbstractPushClient {
 
 	private static final Log LOG = LogFactory.getLog(MinaPushClient.class);
-	private final BlockingDeque<FileLineMessage> sendQ;
+	private final BlockingDeque<FileLineMessage> sendDeque;
 	private final StreamingEndpoint endpoint;
 	
 	private final SocketConnector connector;
@@ -41,9 +41,9 @@ public class MinaPushClient  extends AbstractPushClient {
 			FileReaderManager fileReaderManager) throws Exception {
 		super(endpoint, id, type, fileReaderManager);
 		this.endpoint = endpoint;
-		// share the dequeue
-		sendQ = fileReaderManager.getTypedMessageQueue(type);
-		Preconditions.checkArgument(sendQ != null, "Coundn't find sendQ for: type=" + type);
+		// share the deque
+		sendDeque = fileReaderManager.getTypedMessageQueue(type);
+		Preconditions.checkArgument(sendDeque != null, "Coundn't find sendQ for: type=" + type);
 		
 		connector = new NioSocketConnector();
 		sendSleepInterval = agentConfig.getInt(AgentKeys.AGENT_CLIENT_SEND_SLEEP_INTERVAL, 20);
@@ -142,14 +142,14 @@ public class MinaPushClient  extends AbstractPushClient {
 				}
 				
 				// send events
-				final FileLineMessage event = sendQ.pollFirst(); // couldn't block
-				LOG.debug("Poll: event=" + event);
-				if(event == null) {
+				final FileLineMessage message = sendDeque.pollFirst(); // couldn't block
+				LOG.debug("Poll: message=" + message);
+				if(message == null) {
 					Thread.sleep(waitPollAvailableInterval);
-					LOG.debug("Send Q is empty, wait " + waitPollAvailableInterval + " ms...");
+					LOG.debug("Send deque is empty, wait " + waitPollAvailableInterval + " ms...");
 				} else {
-					ioSession.write(event);
-					LOG.info("Write done: meta=[" + event.getFileMeta() + "]");
+					ioSession.write(message);
+					LOG.info("Write done: meta=[" + message.getFileMeta() + "]");
 					
 					// limit send speed
 					LOG.debug("Limit send speed, sleep " + sendSleepInterval + " ms...");

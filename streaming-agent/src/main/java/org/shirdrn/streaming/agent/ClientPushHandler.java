@@ -44,9 +44,9 @@ public class ClientPushHandler extends IoHandlerAdapter {
 	@Override
 	public void messageReceived(IoSession session, Object message)
 			throws Exception {
-		int clientID = (Integer) session.getAttribute(StreamingKeys.PUSH_CELINT_ID);
+		int clientId = (Integer) session.getAttribute(StreamingKeys.PUSH_CELINT_ID);
 		FileMeta meta = (FileMeta) message;
-		LOG.info("Recv ack: clientId=" + clientID + ", ack=[" + meta + "]");
+		LOG.info("Recv ack: clientId=" + clientId + ", ack=[" + meta + "]");
 		fileReaderManager.getFileMetadataManager().completeTx(meta);
 	}
 
