@@ -1,11 +1,7 @@
 package org.shirdrn.streaming.agent;
 
-import java.io.Closeable;
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.io.RandomAccessFile;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -23,6 +19,8 @@ import org.shirdrn.streaming.common.Configurable;
 import org.shirdrn.streaming.common.FileLineMessage;
 import org.shirdrn.streaming.common.FileMeta;
 import org.shirdrn.streaming.common.LifecycleAware;
+import org.shirdrn.streaming.file.AbstractReader;
+import org.shirdrn.streaming.file.FileReadable;
 import org.shirdrn.streaming.utils.Pair;
 import org.shirdrn.streaming.utils.ThreadPoolUtils;
 
@@ -38,7 +36,7 @@ public class FileReaderManager implements LifecycleAware, Configurable {
 	// Map<type, reader>
 	private final Map<Integer, ReadWorker> typedReaderThreads = Maps.newHashMap();
 	// Event sent by client(PUSH side)
-	private final Map<Integer, BlockingDeque<FileLineMessage>> typedEventQueues = Maps.newHashMap();
+	private final Map<Integer, BlockingDeque<FileLineMessage>> typedMessageQueues = Maps.newHashMap();
 	
 	private ExecutorService readerExecutorService;
 	private final String readerPoolName = "READER";
@@ -55,7 +53,7 @@ public class FileReaderManager implements LifecycleAware, Configurable {
 		// for each type, has a separated event queue
 		for(int type : directoriesManager.getTypes()) {
 			BlockingDeque<FileLineMessage> eventQ = new LinkedBlockingDeque<FileLineMessage>(capacity);
-			typedEventQueues.put(type, eventQ);
+			typedMessageQueues.put(type, eventQ);
 			LOG.debug("Create eventQ: type=" + type + ", eventQ=" + eventQ);
 		}
 	}
@@ -109,9 +107,10 @@ public class FileReaderManager implements LifecycleAware, Configurable {
 	}
 	
 	static class ReadTask {
-		int type;
-		FileMeta meta;
-		File file;
+		
+		protected int type;
+		protected FileMeta meta;
+		protected File file;
 		
 		@Override
 		public String toString() {
@@ -125,27 +124,28 @@ public class FileReaderManager implements LifecycleAware, Configurable {
 		LOG.debug("Assign read task to: " + t);
 		if(t != null) {
 			try {
-				t.readTaskQ.put(task);
+				t.readTaskQueue.put(task);
 			} catch (InterruptedException e) {
 				e.printStackTrace();
 			}
 		}
 	}
 	
-	final class ReadWorker implements Runnable, Closeable {
+	final class ReadWorker implements Runnable {
 
 		private final int type;
 		private final File dir;
-		private final BlockingDeque<ReadTask> readTaskQ ;
+		private final BlockingDeque<ReadTask> readTaskQueue ;
 		private final  BlockingDeque<FileLineMessage> eventQ;
 		private final int waitFileBeingWrittenInterval;
 		private final int waitReadTaskArrivalInterval;
+		private FileReadable<Pair<Integer, String>> reader;
 		
 		public ReadWorker(int type) {
 			this.type = type;
 			dir = directoriesManager.getDir(type);
-			readTaskQ = new LinkedBlockingDeque<ReadTask>();
-			eventQ = typedEventQueues.get(type);
+			readTaskQueue = new LinkedBlockingDeque<ReadTask>();
+			eventQ = typedMessageQueues.get(type);
 			Preconditions.checkArgument(eventQ != null, "Coundn't get event queue for: type=" + type);
 			
 			waitFileBeingWrittenInterval = agentConfig.getInt(
@@ -160,11 +160,10 @@ public class FileReaderManager implements LifecycleAware, Configurable {
 			int debugSleepPutToQInterval = 3000;
 			// start to read
 			LOG.debug("Loop: start to read...");
-			FileReader reader = null;
 			ReadTask task = null;
 			try {
 				// couldn't support to add ReadTask dynamically
-				task = readTaskQ.pollFirst();
+				task = readTaskQueue.pollFirst();
 				LOG.debug("poll: task=" + task);
 				if(task != null) {
 					reader = new FileReader(task.file, task.meta);
@@ -187,16 +186,11 @@ public class FileReaderManager implements LifecycleAware, Configurable {
 								
 								// blocked if queue is full
 								eventQ.putLast(event);
-//								// offer to the q
-//								while(!eventQ.offerLast(event)) {
-//									LOG.debug("Event Q is full, wait " + waitOfferAvailableInterval + " ms...");
-//									Thread.sleep(waitOfferAvailableInterval);
-//								}
 								LOG.debug("Added to event Q: size=" + eventQ.size() + ", event=[" + event + "]");
 							} catch (Exception e) {
 								LOG.error("Fail to read a line: ", e);
 								if(task != null) {
-									readTaskQ.put(task);
+									readTaskQueue.put(task);
 								}
 							}
 						}
@@ -222,11 +216,6 @@ public class FileReaderManager implements LifecycleAware, Configurable {
 		}
 
 		@Override
-		public void close() throws IOException {
-			
-		}
-		
-		@Override
 		public String toString() {
 			return "READER-TREAHD[" + type + "=>" + dir + "]";
 		}
@@ -237,44 +226,55 @@ public class FileReaderManager implements LifecycleAware, Configurable {
 		return agentConfig;
 	}
 	
-	final class FileReader implements Iterator<Pair<Integer, String>>, Closeable {
-		
-		private final File file;
-		private RandomAccessFile randomAccessFile;
-		private final FileMeta meta;
+	final class FileReader extends AbstractReader<Pair<Integer, String>> {
+
+		private final FileMeta fileMeta;
 		private long length;
-		private long currentPos;
+		private long position;
 		private int offset;
 		private String currentLine = null;
-		
-		public FileReader(File logFile, FileMeta meta) throws IOException {
-			this.file = logFile;
-			this.meta = meta;
-		}
 
-		public void open() throws FileNotFoundException, IOException {
-			this.randomAccessFile = new RandomAccessFile(this.file, "r");
+		public FileReader(File file, FileMeta fileMeta) {
+			super(file);
+			this.fileMeta = fileMeta;
+		}
+		
+		@Override
+		public void open() throws IOException {
+			super.open();
 			LOG.debug("File reader opened: " + randomAccessFile);
 			this.length = getLength();
-			this.currentPos = getPosition();
+			this.position = getPosition();
 			// skip offset lines
+			// and seek the proper position to continue to read
+			seek();			
+		}
+
+		private void seek() throws IOException {
 			int i = 0;
-			LOG.debug("Line offset: " + meta.getOffset());
-			while(i<meta.getOffset()) {
+			LOG.debug("Line offset: " + fileMeta.getOffset());
+			while(i<fileMeta.getOffset()) {
 				read();
 				i++;
 			}
-			offset = meta.getOffset();
+			offset = fileMeta.getOffset();
+		}
+		
+		private void read() throws IOException {
+			currentLine = randomAccessFile.readLine();
+			currentLine = new String(currentLine.getBytes("ISO8859-1"), "UTF-8");
+			LOG.debug("currentLine=" + currentLine);
+			position = getPosition();
+			++offset;
 		}
 
 		@Override
-		public boolean hasNext() {
+		public boolean hasNext() throws IOException {
 			currentLine = null;
 			try {
-				
 				while(true) {
-					LOG.debug("currentPos=" + currentPos + ", length=" + length);
-					if(currentPos < length) {
+					LOG.debug("currentPos=" + position + ", length=" + length);
+					if(position < length) {
 						// here blocking may occur
 						read();
 						return true;
@@ -295,47 +295,10 @@ public class FileReaderManager implements LifecycleAware, Configurable {
 			}
 		}
 
-		private void read() throws IOException {
-			currentLine = randomAccessFile.readLine();
-			currentLine = new String(currentLine.getBytes("ISO8859-1"), "UTF-8");
-			LOG.debug("currentLine=" + currentLine);
-			currentPos = getPosition();
-			++offset;
-		}
-		
-		private long getPosition() throws IOException {
-			return randomAccessFile.getFilePointer();
-	    }
-		
-		private long getLength() throws IOException {
-			return randomAccessFile.length();
-	    }
-
 		@Override
-		public Pair<Integer, String> next() {
+		public Pair<Integer, String> next() throws IOException {
 			LOG.debug("Line offset=" + (offset-1));
 			return new Pair<Integer, String>(offset-1, currentLine);
-		}
-
-		@Override
-		public void remove() {
-			throw new UnsupportedOperationException("Unsupported operation: remove()");
-		}
-
-		@Override
-		public void close() throws IOException {
-			if(randomAccessFile != null) {
-				randomAccessFile.close();
-			}
-		}
-		
-		@Override
-		public String toString() {
-			return "READER[" + file + "]";
-		}
-
-		public int getOffset() {
-			return offset;
 		}
 		
 	}
@@ -344,8 +307,8 @@ public class FileReaderManager implements LifecycleAware, Configurable {
 		return fileMetadataManager;
 	}
 
-	public BlockingDeque<FileLineMessage> getTypedEventQ(int type) {
-		return typedEventQueues.get(type);
+	public BlockingDeque<FileLineMessage> getTypedMessageQueue(int type) {
+		return typedMessageQueues.get(type);
 	}
 
 }

@@ -42,7 +42,7 @@ public class MinaPushClient  extends AbstractPushClient {
 		super(endpoint, id, type, fileReaderManager);
 		this.endpoint = endpoint;
 		// share the dequeue
-		sendQ = fileReaderManager.getTypedEventQ(type);
+		sendQ = fileReaderManager.getTypedMessageQueue(type);
 		Preconditions.checkArgument(sendQ != null, "Coundn't find sendQ for: type=" + type);
 		
 		connector = new NioSocketConnector();

@@ -1,10 +1,8 @@
 package org.shirdrn.streaming.agent;
 
-import java.io.Closeable;
 import java.io.File;
 import java.io.FilenameFilter;
 import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.Charset;
@@ -33,6 +31,9 @@ import org.shirdrn.streaming.agent.constants.AgentConstants;
 import org.shirdrn.streaming.agent.constants.AgentKeys;
 import org.shirdrn.streaming.common.FileMeta;
 import org.shirdrn.streaming.common.LifecycleAware;
+import org.shirdrn.streaming.file.AbstractWriter;
+import org.shirdrn.streaming.file.FileAccessor;
+import org.shirdrn.streaming.file.FileReadable;
 import org.shirdrn.streaming.utils.Pair;
 import org.shirdrn.streaming.utils.ThreadPoolUtils;
 
@@ -65,19 +66,18 @@ public class FileMetadataManager implements LifecycleAware {
 	};
 	
 	private ExecutorService executorService;
-	private LogFileIdxWriter idxMetaWriter;
-//	private LogTxMetaWriter txMetaWriter;
-	private Map<Integer, LogTxMetaWriter> txMetaWriters = Maps.newHashMap();
-	// Map<fileID, file>
+	private FileAccessor<Pair<Integer, String>> idxFileAccessor;
+	private Map<Integer, TxFileAccessor> txFileAccessors = Maps.newHashMap();
+	// Map<fileId, file>
 	private final ConcurrentMap<Integer, File> idToFileIndexMap = Maps.newConcurrentMap();
-	// Map<file, fileID>
+	// Map<file, fileId>
 	private final ConcurrentMap<File, Integer> fileToIdIndexMap = Maps.newConcurrentMap();
-	// Map<fileID, txid>
+	// Map<fileId, txid>
 	private final Map<Integer, Long> fileIDToTxidMap = Maps.newHashMap();
-	// After succeeding to send a event, event will be in the q
-	private final Map<Integer, BlockingDeque<FileMeta>> txCallbackQueues = Maps.newHashMap();
-	// Map<type, lastTxMetaFile>
-	private Map<Integer, File> lastTxMetaFileMap = Maps.newHashMap();
+	// After succeeding to send a message, message will be in the queue
+	private final Map<Integer, BlockingDeque<FileMeta>> txidCallbackQueues = Maps.newHashMap();
+	// Map<type, lastTxFile>
+	private Map<Integer, File> lastTxFileMap = Maps.newHashMap();
 	private final int qOfferOrPollWaitInterval;
 	
 	public FileMetadataManager(DirectoriesManager directoriesManager) {
@@ -89,45 +89,44 @@ public class FileMetadataManager implements LifecycleAware {
 				AgentKeys.AGENT_MESSAGE_QUEUE_OFFER_OR_POLL_WAIT_INTERVAL, 200);
 		
 		metadataRoot = checkMetaRoot(agentConfig);
-		final File idxMetaFile = getIdxMetaFile();
+		final File idxFile = getIdxMetaFile();
 		// if idx file is empty, delete it
-		if(idxMetaFile.exists() && idxMetaFile.length() == 0) {
-			Preconditions.checkArgument(getIdxMetaFile().delete(), "Fail to delete empty IDX file!");
+		if(idxFile.exists() && idxFile.length() == 0) {
+			Preconditions.checkArgument(getIdxMetaFile().delete(), "Fail to delete empty idx file!");
 		}
-		LOG.info("IDX meta file: " + idxMetaFile);
+		LOG.info("IDX meta file: " + idxFile);
 		
 		try {
-			idxMetaWriter = new LogFileIdxWriter(idxMetaFile);
-			
-			// each log type has a tx meta writer
+			idxFileAccessor = new IdexFileAccessor(idxFile);
+			// each type has a TX file accessor
 			for(int type : directoriesManager.getTypes()) {
-				String logFileName = directoriesManager.getFiles(type).iterator().next().getName();
-				File txMetaFile = getTxMetaFile(logFileName);
-				LOG.info("TX meta file: " + txMetaFile);
-				if(txMetaFile.exists() && txMetaFile.length()>0) {
-					File lastTxMetaFile = renameTxFile(txMetaFile, logFileName);
-					// add to lastTxMetaFileMap
-					lastTxMetaFileMap.put(type, lastTxMetaFile);
-					txMetaFile = getTxMetaFile(logFileName);
+				String fileName = directoriesManager.getFiles(type).iterator().next().getName();
+				File txFile = getTxFile(fileName);
+				LOG.info("TX file: " + txFile);
+				if(txFile.exists() && txFile.length()>0) {
+					File lastTxFile = renameTxFile(txFile, fileName);
+					// add to lastFileMap
+					lastTxFileMap.put(type, lastTxFile);
+					txFile = getTxFile(fileName);
 				}
-				LogTxMetaWriter txMetaWriter = new LogTxMetaWriter(txMetaFile);
-				txMetaWriters.put(type, txMetaWriter);
+				TxFileAccessor txFileAccessor = new TxFileAccessor(txFile);
+				txFileAccessors.put(type, txFileAccessor);
 			}
 		} catch (IOException e) {
 			e.printStackTrace();
 		}
 	}
 	
-	private File getTxMetaFile(String logFileName) {
-		return new File(metadataRoot, logFileName + AgentConstants.STREAMING_META_TX_SUFFIX);
+	private File getTxFile(String fileName) {
+		return new File(metadataRoot, fileName + AgentConstants.STREAMING_META_TX_SUFFIX);
 	}
 	
 	private File getIdxMetaFile() {
 		return new File(metadataRoot, AgentConstants.STREAMING_META_IDX);
 	}
 	
-	private File renameTxFile(File txMetaFile, String fileName) {
-		File f = txMetaFile;
+	private File renameTxFile(File txFile, String fileName) {
+		File f = txFile;
 		final Pattern pattern = 
 				Pattern.compile(fileName + "\\" + AgentConstants.STREAMING_META_TX_SUFFIX + "\\.\\d+");
 		String[] txFilenames = metadataRoot.list(new FilenameFilter() {
@@ -137,12 +136,12 @@ public class FileMetadataManager implements LifecycleAware {
 			}
 		});
 		int maxIdx = getMaxSeqNo(txFilenames);
-		if(txMetaFile.exists()) {
-			File newFile = new File(metadataRoot, txMetaFile.getName() + "." + (maxIdx + 1));
-			txMetaFile.renameTo(newFile);
+		if(txFile.exists()) {
+			File newFile = new File(metadataRoot, txFile.getName() + "." + (maxIdx + 1));
+			txFile.renameTo(newFile);
 			f = newFile;
 		}
-		LOG.info("Rename tx meta file: from=" + txMetaFile + ", to=" + f);
+		LOG.info("Rename TX file: from=" + txFile + ", to=" + f);
 		return f;
 	}
 
@@ -157,7 +156,7 @@ public class FileMetadataManager implements LifecycleAware {
 				}
 			} catch (Exception e) {}
 		}
-		LOG.debug("Get tx meta file max seq num: " + max);
+		LOG.debug("Get TX file max seq num: " + max);
 		return max;
 	}
 
@@ -180,57 +179,56 @@ public class FileMetadataManager implements LifecycleAware {
 	
 	@Override
 	public void start() throws Exception {
-		// load/read idx meta file
+		// load/read IDX file
 		initIdxFile();
 		
-		// load tx meta files
+		// load TX files
 		for(int type : directoriesManager.getTypes()) {
 			initTxMetaFile(type);
 			BlockingDeque<FileMeta> deque = new LinkedBlockingDeque<FileMeta>(2000);
-			txCallbackQueues.put(type, deque);
+			txidCallbackQueues.put(type, deque);
 		}
 				
 		executorService = ThreadPoolUtils.newCachedThreadPool("TXCHKER");
-		// check the tx queue, and store fileID and tx
+		// check the txid queue, and store fileId and txid
 		for(int type : directoriesManager.getTypes()) {
-			Thread txChecker = new TxCallbackChecker(type);
-			executorService.execute(txChecker);
+			executorService.execute(new TxCallbackChecker(type));
 		}
 	}
 	
 	final class TxCallbackChecker extends Thread {
 		
-		private final BlockingDeque<FileMeta> txDeque;
-		private final LogTxMetaWriter txWriter;
-		private final int txQueueCheckInterval;
+		private final BlockingDeque<FileMeta> txidDeque;
+		private final TxFileAccessor txFileAccessor;
+		private final int txidDequeCheckInterval;
 		
-		public TxCallbackChecker(int logType) {
+		public TxCallbackChecker(int type) {
 			// the interval should be small, cos we should write txid sequences as soon as possible,
 			// and the returned callback TX couldn't miss due to unexceptionally application sceneries,
 			// such as program crash, machine down, etc.
-			txQueueCheckInterval = agentConfig.getInt(
+			txidDequeCheckInterval = agentConfig.getInt(
 					AgentKeys.AGENT_CALLBACK_TX_QUEUE_CHECK_INTERVAL, 200);
-			txDeque = txCallbackQueues.get(logType);
-			Preconditions.checkArgument(txDeque != null, "Coundn't find TX deque for: logType=" + logType);
+			txidDeque = txidCallbackQueues.get(type);
+			Preconditions.checkArgument(txidDeque != null, "Coundn't find TX deque for: type=" + type);
 			
-			txWriter = txMetaWriters.get(logType);
-			Preconditions.checkArgument(txWriter != null, "Never intialize TX writer for: logType=" + logType);
+			txFileAccessor = txFileAccessors.get(type);
+			Preconditions.checkArgument(txFileAccessor != null, "Never intialize TX accessor for: type=" + type);
 		}
 		@Override
 		public void run() {
 			while(true) {
 				try {
-					FileMeta event = txDeque.pollFirst();
+					FileMeta event = txidDeque.pollFirst();
 					if(event != null) {
-						txWriter.write(event);
-						txWriter.commit();
+						txFileAccessor.write(event);
+						txFileAccessor.flush();
 						LOG.debug("Sync: event=[" + event + "]");
 						LOG.info("Sync: txid=" + event.getTxid());
 						// add to memory storage
 						fileIDToTxidMap.put(event.getFileId(), event.getTxid());
 					} else {
-						Thread.sleep(txQueueCheckInterval);
-						LOG.debug("Tx Q is empty, wait " + txQueueCheckInterval + " ms...");
+						Thread.sleep(txidDequeCheckInterval);
+						LOG.debug("Tx deque is empty, wait " + txidDequeCheckInterval + " ms...");
 					}
 				} catch (Exception e) {
 					LOG.warn("", e);
@@ -243,38 +241,38 @@ public class FileMetadataManager implements LifecycleAware {
 		// if meta data exists
 		if(metaExists(agentConfig)) {
 			// open meta writer
-			LogTxMetaWriter txWriter = txMetaWriters.get(type);
-			txWriter.open();
-			while(txWriter.hasNext()) {
-				FileMeta event = txWriter.next();
-				fileIDToTxidMap.put(event.getFileId(), event.getTxid());
+			TxFileAccessor txFileAccessor = txFileAccessors.get(type);
+			txFileAccessor.open();
+			while(txFileAccessor.hasNext()) {
+				FileMeta fileMeta = txFileAccessor.next();
+				fileIDToTxidMap.put(fileMeta.getFileId(), fileMeta.getTxid());
 			}
 		}
 	}
 	
-	public ReadTask newReadTask(int logType, int fileID, int offset) {
+	public ReadTask newReadTask(int type, int fileId, int offset) {
 		ReadTask task = new ReadTask();
 		FileMeta meta = new FileMeta();
-		meta.setType(logType);
-		meta.setFileId(fileID);
+		meta.setType(type);
+		meta.setFileId(fileId);
 		meta.setOffset(offset);
 		meta.setTxid(TxidGenerator.next());
-		task.type = logType;
+		task.type = type;
 		task.meta = meta;
-		task.file = idToFileIndexMap.get(fileID);
+		task.file = idToFileIndexMap.get(fileId);
 		return task;
 	}
 	
 	public int newFileID(File file) {
-		int fileID = FileIDGenerator.next();
+		int fileId = FileIDGenerator.next();
 		try {
-			idxMetaWriter.write(Pair.of(fileID, file.getAbsolutePath()));
-			LOG.info("Written: fileID=" + fileID + ", file=" + file);
-			putFileIndex(fileID, file);
+			idxFileAccessor.write(Pair.of(fileId, file.getAbsolutePath()));
+			LOG.info("Written: fileId=" + fileId + ", file=" + file);
+			putFileIndex(fileId, file);
 		} catch (IOException e) {
 			e.printStackTrace();
 		}
-		return fileID;
+		return fileId;
 	}
 	
 	private void putFileIndex(int fileID, File file) {
@@ -283,14 +281,14 @@ public class FileMetadataManager implements LifecycleAware {
 	}
 
 	/**
-	 * If file 'log.idx' exists, load file data into memory, and merge with files
+	 * If file '*.idx' exists, load file data into memory, and merge with files
 	 * in the configured directory currently, else write file meta data into
-	 * file 'log.idx'.
+	 * file '*.idx'.
 	 * @throws IOException 
 	 */
 	private void initIdxFile() throws IOException {
 		// if meta data doesn't exist
-		idxMetaWriter.open(); // open idx meta writer
+		idxFileAccessor.open(); // open idx meta writer
 		if(!metaExists(agentConfig)) {
 			LOG.info("Meta files not found, first time initialize...");
 			// write file index data
@@ -300,26 +298,26 @@ public class FileMetadataManager implements LifecycleAware {
 				int fileID = pair.getKey();
 				String file = pair.getValue().getAbsolutePath();
 				LOG.debug("Write file index: fileID=" + fileID + ", file=" + file);
-				idxMetaWriter.write(Pair.of(fileID, file));
+				idxFileAccessor.write(Pair.of(fileID, file));
 			}
-			idxMetaWriter.commit();
+			idxFileAccessor.flush();
 		} else {
 			// read data from file index
-			while(idxMetaWriter.hasNext()) {
-				Pair<Integer, String> pair = idxMetaWriter.next();
-				int fileID = pair.getLeft();
+			while(idxFileAccessor.hasNext()) {
+				Pair<Integer, String> pair = idxFileAccessor.next();
+				int fileId = pair.getLeft();
 				File file = new File(pair.getRight());
-				LOG.debug("Read file index: fileID=" + fileID + ", file=" + file);
-				putFileIndex(fileID, file);
+				LOG.debug("Read file index: filed=" + fileId + ", file=" + file);
+				putFileIndex(fileId, file);
 			}
 			// set fileID generator start ID
 			setStartFileIDForGenerator();
 			
-			// merge log files
+			// merge files
 			saveOrMergeIdxFiles();
 		}
-		// Close idx meta writer.
-		idxMetaWriter.close();
+		// Close IDX file accessor.
+		idxFileAccessor.close();
 		
 	}
 
@@ -331,7 +329,7 @@ public class FileMetadataManager implements LifecycleAware {
 	public List<ReadTask> pullInitialReadTasks() throws IOException {
 		List<ReadTask> tasks = new ArrayList<ReadTask>();
 		// first time start
-		if(lastTxMetaFileMap.isEmpty()) {
+		if(lastTxFileMap.isEmpty()) {
 			LOG.debug("First time to start, initialize read tasks...");
 			for(Map.Entry<Integer,File> entry : idToFileIndexMap.entrySet()) {
 				collectReadTasks(tasks, entry.getKey(), 0, entry.getValue());
@@ -339,21 +337,21 @@ public class FileMetadataManager implements LifecycleAware {
 		} else {
 			// after recover, seek the proper point to read
 			LOG.debug("Try to recover tx files, and reset read pos...");
-			for(Entry<Integer, File> entry : lastTxMetaFileMap.entrySet()) {
+			for(Entry<Integer, File> entry : lastTxFileMap.entrySet()) {
 				File lastTxMetaFile = entry.getValue();
-				LogTxMetaWriter reader = new LogTxMetaWriter(lastTxMetaFile);
+				TxFileAccessor reader = new TxFileAccessor(lastTxMetaFile);
 				reader.open("r");
 				// <fileID, max offset>
 				Map<Integer, AtomicInteger> m = new HashMap<Integer, AtomicInteger>();
 				while(reader.hasNext()) {
-					FileMeta meta = reader.next();
-					AtomicInteger value = m.get(meta.getFileId());
+					FileMeta fileMeta = reader.next();
+					AtomicInteger value = m.get(fileMeta.getFileId());
 					if(value == null) {
 						value = new AtomicInteger(0);
-						m.put(meta.getFileId(), value);
+						m.put(fileMeta.getFileId(), value);
 					}
-					if(value.get() < meta.getOffset()) {
-						value.set(meta.getOffset());
+					if(value.get() < fileMeta.getOffset()) {
+						value.set(fileMeta.getOffset());
 					}
 				}
 				LOG.debug("Tx meta map: " + m);
@@ -376,7 +374,7 @@ public class FileMetadataManager implements LifecycleAware {
 	}
 
 	private void saveOrMergeIdxFiles() {
-		LOG.debug("Prepare to iterate log files: " + directoriesManager.getFiles());
+		LOG.debug("Prepare to iterate files: " + directoriesManager.getFiles());
 		for(Entry<File,List<FileInfo>> entry : directoriesManager.getFiles().entrySet()) {
 			for(FileInfo fi : entry.getValue()) {
 				if(!fileToIdIndexMap.containsKey(fi.getFile())) {
@@ -397,125 +395,78 @@ public class FileMetadataManager implements LifecycleAware {
 		FileIDGenerator.setInitialValue(max);
 	}
 	
-	interface Readable<T> {
-		
-		boolean hasNext() throws IOException;
-		T next() throws IOException;
-	}
-	
-	final class LogFileIdxWriter extends AbstractWriter<Pair<Integer, String>> 
-		implements Readable<Pair<Integer, String>> {
-		
-		LogFileIdxWriter(File file) throws IOException {
+	final class IdexFileAccessor extends AbstractWriter<Pair<Integer, String>> 
+		implements FileAccessor<Pair<Integer, String>> {
+
+		public IdexFileAccessor(File file) {
 			super(file);
 		}
-		
+
 		@Override
-		public void write(Pair<Integer, String> event) throws IOException {
-			Preconditions.checkArgument(fileHandle.getChannel().isOpen(), "File was closed!");
-			// write fileID
-			fileHandle.writeInt(event.getLeft());
+		public void write(Pair<Integer, String> data) throws IOException {
+			Preconditions.checkArgument(randomAccessFile.getChannel().isOpen(), "File was closed!");
+			// write fileId
+			randomAccessFile.writeInt(data.getLeft());
 			CharsetEncoder encoder = ENCODER_FACTORY.get();
-			ByteBuffer buf = encoder.encode(CharBuffer.wrap(event.getRight().toCharArray()));
+			ByteBuffer buf = encoder.encode(CharBuffer.wrap(data.getRight().toCharArray()));
 			// write file name length
-			fileHandle.writeInt(buf.limit());
+			randomAccessFile.writeInt(buf.limit());
 			// write file
-			fileHandle.write(buf.array(), 0, buf.limit());
+			randomAccessFile.write(buf.array(), 0, buf.limit());			
+		}
+
+		@Override
+		public boolean hasNext() throws IOException {
+			return super.getPosition() < randomAccessFile.length();
 		}
 
 		@Override
 		public Pair<Integer, String> next() throws IOException {
-			int fileID = fileHandle.readInt();
-			int len = fileHandle.readInt();
+			int fileId = randomAccessFile.readInt();
+			int len = randomAccessFile.readInt();
 			CharsetDecoder decoder = DECODER_FACTORY.get();
 			byte[] buf = new byte[len];
-			fileHandle.read(buf, 0, len);
+			randomAccessFile.read(buf, 0, len);
 			String file = decoder.decode(ByteBuffer.wrap(buf)).toString();
-			return Pair.of(fileID, file);
+			return Pair.of(fileId, file);
 		}
-
-		@Override
-		public boolean hasNext() throws IOException {
-			return super.getPosition() < fileHandle.length();
-		}
+		
 	}
 	
-	final class LogTxMetaWriter extends AbstractWriter<FileMeta> 
-		implements Readable<FileMeta> {
+	final class TxFileAccessor extends AbstractWriter<FileMeta> 
+		implements FileReadable<FileMeta> {
 		
-		public LogTxMetaWriter(File file) throws IOException {
+		public TxFileAccessor(File file) throws IOException {
 			super(file);
 		}
 		
 		@Override
-		public void write(FileMeta event) throws IOException {
-			// write logType
-			fileHandle.writeInt(event.getType());
+		public void write(FileMeta fileMeta) throws IOException {
+			// write type
+			randomAccessFile.writeInt(fileMeta.getType());
 			// write fileID
-			fileHandle.writeInt(event.getFileId());
+			randomAccessFile.writeInt(fileMeta.getFileId());
 			// write offset
-			fileHandle.writeInt(event.getOffset());
+			randomAccessFile.writeInt(fileMeta.getOffset());
 			// write txid
-			fileHandle.writeLong(event.getTxid());
+			randomAccessFile.writeLong(fileMeta.getTxid());
 		}
 		
 		@Override
 		public boolean hasNext() throws IOException {
-			return super.getPosition() < fileHandle.length();
+			return super.getPosition() < randomAccessFile.length();
 		}
 		
 		@Override
 		public FileMeta next() throws IOException {
-			int logType = fileHandle.readInt();
-			int fileID = fileHandle.readInt();
-			int offset = fileHandle.readInt();
-			long txid = fileHandle.readLong();
-			LOG.debug("logType=" + logType + ", fileID=" + fileID + ", offset=" + offset + ", txid=" + txid);
-			return FileMeta.from(logType, fileID, offset, txid);
+			int type = randomAccessFile.readInt();
+			int fileId = randomAccessFile.readInt();
+			int offset = randomAccessFile.readInt();
+			long txid = randomAccessFile.readLong();
+			LOG.debug("type=" + type + ", fileId=" + fileId + ", offset=" + offset + ", txid=" + txid);
+			return FileMeta.from(type, fileId, offset, txid);
 		}
 	}
-
-	abstract class FileOp implements Closeable {
-		
-		protected final File file;
-		protected RandomAccessFile fileHandle;
-		
-		public FileOp(File file) {
-			this.file = file;
-			
-		}
-		
-		protected long getPosition() throws IOException {
-			return fileHandle.getFilePointer();
-		}
-		
-		public void open(String mode) throws IOException {
-			this.fileHandle = new RandomAccessFile(this.file, mode);
-		}
-		
-		@Override
-		public void close() throws IOException {
-			fileHandle.close();
-		}
-	}
-	
-	abstract class AbstractWriter<T> extends FileOp {
-		
-		public AbstractWriter(File file) throws IOException {
-			super(file);
-		}
-		
-		public void open() throws IOException {
-			super.open("rw");
-		}
-		
-		public abstract void write(T event) throws IOException;
-		
-		public void commit() throws IOException {
-			fileHandle.getChannel().force(false);
-		}
-	}
-	
 
 	public DirectoriesManager getDirectoriesManager() {
 		return directoriesManager;
@@ -523,8 +474,8 @@ public class FileMetadataManager implements LifecycleAware {
 
 	@Override
 	public void stop() throws Exception {
-		idxMetaWriter.close();
-		for(Entry<Integer, LogTxMetaWriter> entry : txMetaWriters.entrySet()) {
+		idxFileAccessor.close();
+		for(Entry<Integer, TxFileAccessor> entry : txFileAccessors.entrySet()) {
 			entry.getValue().close();	
 		}
 	}
@@ -565,7 +516,7 @@ public class FileMetadataManager implements LifecycleAware {
 	}
 	
 	public void completeTx(FileMeta event) {
-		BlockingDeque<FileMeta> q = txCallbackQueues.get(event.getType());
+		BlockingDeque<FileMeta> q = txidCallbackQueues.get(event.getType());
 		while(!q.offerLast(event)) {
 			try {
 				Thread.sleep(qOfferOrPollWaitInterval);
