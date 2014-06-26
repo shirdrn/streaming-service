@@ -12,7 +12,7 @@ public interface AgentKeys {
 	String AGENT_MESSAGE_QUEUE_CAPACITY = "agent.message.queue.capacity";
 	String AGENT_CLIENT_SEND_SLEEP_INTERVAL = "agent.client.send.sleep.interval";
 	String AGENT_MESSAGE_QUEUE_OFFER_OR_POLL_WAIT_INTERVAL = "agent.message.queue.offer.or.poll.wait.interval";
-	String AGENT_READER_WORKER_WAIT_FILE_BEING_WRITTEN_INTERVAL = "agent.reader.work.wait.file.being.written.interval";
+	String AGENT_READER_WORKER_WAIT_FILE_BEING_WRITTEN_INTERVAL = "agent.reader.worker.wait.file.being.written.interval";
 	String AGENT_READER_WORKER_WAIT_READ_TASK_ARRIVAL_INTERVAL = "agent.reader.worker.wait.read.task.arrival.interval";
 	String AGENT_CALLBACK_TX_QUEUE_CHECK_INTERVAL = "agent.callback.tx.queue.check.interval";
 	
