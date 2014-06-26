@@ -1,4 +1,4 @@
-package org.shirdrn.streaming.file;
+package org.shirdrn.streaming.common.file;
 
 import java.io.File;
 import java.io.IOException;

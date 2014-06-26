@@ -31,9 +31,9 @@ import org.shirdrn.streaming.agent.constants.AgentConstants;
 import org.shirdrn.streaming.agent.constants.AgentKeys;
 import org.shirdrn.streaming.common.FileMeta;
 import org.shirdrn.streaming.common.LifecycleAware;
-import org.shirdrn.streaming.file.AbstractWriter;
-import org.shirdrn.streaming.file.FileAccessor;
-import org.shirdrn.streaming.file.FileReadable;
+import org.shirdrn.streaming.common.file.AbstractWriter;
+import org.shirdrn.streaming.common.file.FileAccessor;
+import org.shirdrn.streaming.common.file.FileReadable;
 import org.shirdrn.streaming.utils.Pair;
 import org.shirdrn.streaming.utils.ThreadPoolUtils;
 

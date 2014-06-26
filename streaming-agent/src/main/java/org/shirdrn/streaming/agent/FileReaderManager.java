@@ -19,8 +19,8 @@ import org.shirdrn.streaming.common.Configurable;
 import org.shirdrn.streaming.common.FileLineMessage;
 import org.shirdrn.streaming.common.FileMeta;
 import org.shirdrn.streaming.common.LifecycleAware;
-import org.shirdrn.streaming.file.AbstractReader;
-import org.shirdrn.streaming.file.FileReadable;
+import org.shirdrn.streaming.common.file.AbstractReader;
+import org.shirdrn.streaming.common.file.FileReadable;
 import org.shirdrn.streaming.utils.Pair;
 import org.shirdrn.streaming.utils.ThreadPoolUtils;
 
